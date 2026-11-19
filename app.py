@@ -9,7 +9,6 @@ import tempfile
 import uuid
 import hashlib
 import wave
-from math import gcd
 from datetime import datetime, timezone
 from typing import Tuple, List, Dict, Any, Optional
 
@@ -202,15 +201,11 @@ def run_ai_voice_segment(
     try:
         classifier = load_ai_audio_pipeline()
         if sample_rate != AI_AUDIO_MODEL_SAMPLE_RATE:
-            divisor = gcd(sample_rate, AI_AUDIO_MODEL_SAMPLE_RATE)
-            def resample_poly(audio_segment, arg1, arg2):
-                ...
-
-            audio_segment = resample_poly(
+            audio_segment = resample_audio(
                 audio_segment,
-                AI_AUDIO_MODEL_SAMPLE_RATE // divisor,
-                sample_rate // divisor,
-            ).astype(np.float32)
+                AI_AUDIO_MODEL_SAMPLE_RATE,
+                sample_rate,
+            )
         predictions = classifier(
             {"array": audio_segment, "sampling_rate": AI_AUDIO_MODEL_SAMPLE_RATE},
             top_k=None,
@@ -624,10 +619,11 @@ def analyze_audio(raw_bytes: bytes, evidence_id: str, filename: str, sha256_hash
         "notice": "Experimental audio deepfake-model score over sampled segments; not calibrated for synthetic voice and not a probability.",
     }
 
-    def welch(data, fs, nperseg):
-        ...
-
-    freqs, psd = welch(data, fs=sr, nperseg=min(2048, len(data)))
+    freqs, psd = power_spectrum(
+        data,
+        sample_rate=sr,
+        segment_length=min(2048, len(data)),
+    )
     total_energy = float(np.sum(psd)) + 1e-12
     high_mask = freqs > 7000
     high_ratio = float(np.sum(psd[high_mask]) / total_energy) if np.any(high_mask) else 0.0
@@ -771,6 +767,20 @@ def correlate_and_build_report(case_title, investigator, evidence_records, all_f
     morphed_scores = [f["raw_score"] for f in active_findings if f.get("signal_type") == "morphed"]
     fake_scores = [f["raw_score"] for f in active_findings if f.get("signal_type") == "fake"]
 
+    for evidence in evidence_records:
+        metadata = evidence["metadata"]
+        model_result = metadata.get(
+            "experimental_frame_model"
+            if evidence["media_type"] == "video"
+            else "experimental_voice_model"
+            if evidence["media_type"] == "audio"
+            else None
+        )
+        if model_result and model_result.get("status") in {"available", "partial"}:
+            score_percent = model_result.get("score_percent")
+            if score_percent is not None:
+                fake_scores.append(float(score_percent) / 100.0)
+
     morphed_pct = min(94, int(round(max(morphed_scores) * 100)) + contradiction_boost) if morphed_scores else min(94, 6 + contradiction_boost)
     fake_pct = min(94, int(round(max(fake_scores) * 100))) if fake_scores else 0
     combined_pct = min(94, max(morphed_pct, fake_pct))
@@ -809,13 +819,13 @@ def correlate_and_build_report(case_title, investigator, evidence_records, all_f
         "audit_trail": audit_trail,
     }
 
-def getSampleStyleSheet():
-    raise NotImplementedError
+def get_sample_style_sheet():
+    return _reportlab_get_sample_stylesheet()
 
 
 def build_pdf_report(report: Dict[str, Any]) -> bytes:
     buffer = io.BytesIO()
-    styles = getSampleStyleSheet()
+    styles = get_sample_style_sheet()
     styles.add(ParagraphStyle(
         name="ReportTitle",
         parent=styles["Title"],
@@ -1061,6 +1071,22 @@ def build_sample_evidence() -> Tuple[bytes, bytes, str]:
 # Streamlit interface
 st.title("TruthLens", icon=":material/verified_user:")
 st.caption("A digital forensics workspace for reviewing media authenticity.")
+
+st.subheader("Core capabilities", icon=":material/featured_play_list:")
+capability_rows = [
+    ("Image authenticity analysis", "Inspect edits, composition, compression, metadata, and provenance traces."),
+    ("Video forensics", "Analyze frames and temporal consistency to identify suspicious visual segments."),
+    ("Audio and voice analysis", "Check synthetic speech patterns, unusual audio characteristics, and voice traces."),
+    ("Text and context analysis", "Review transcripts and captions for AI phrasing, disinformation cues, and inconsistencies."),
+    ("Cross-modal correlation", "Compare images, video, audio, and text for reinforcement or contradictions."),
+    ("Manipulation indicators", "List suspicious regions, segments, confidence, limitations, and alternative explanations."),
+]
+for row_index in range(0, len(capability_rows), 3):
+    capability_cols = st.columns(3, gap="medium")
+    for col, (title, description) in zip(capability_cols, capability_rows[row_index:row_index + 3]):
+        with col.container(border=True, height="stretch"):
+            st.markdown(f"**{title}**")
+            st.caption(description)
 
 with st.container(border=True):
     st.subheader("Start an investigation", icon=":material/folder_open:")
