@@ -18,6 +18,29 @@ import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageChops, ExifTags
 
+try:
+    reportlab_lib = importlib.import_module("reportlab.lib")
+    reportlab_enums = importlib.import_module("reportlab.lib.enums")
+    reportlab_pagesizes = importlib.import_module("reportlab.lib.pagesizes")
+    reportlab_styles = importlib.import_module("reportlab.lib.styles")
+    reportlab_units = importlib.import_module("reportlab.lib.units")
+    reportlab_platypus = importlib.import_module("reportlab.platypus")
+
+    colors = reportlab_lib.colors
+    TA_CENTER = reportlab_enums.TA_CENTER
+    A4 = reportlab_pagesizes.A4
+    ParagraphStyle = reportlab_styles.ParagraphStyle
+    _reportlab_get_sample_stylesheet = reportlab_styles.getSampleStyleSheet
+    mm = reportlab_units.mm
+    Paragraph = reportlab_platypus.Paragraph
+    SimpleDocTemplate = reportlab_platypus.SimpleDocTemplate
+    Spacer = reportlab_platypus.Spacer
+    Table = reportlab_platypus.Table
+    TableStyle = reportlab_platypus.TableStyle
+    PageBreak = reportlab_platypus.PageBreak
+except ImportError as exc:
+    raise RuntimeError("The 'reportlab' package is required to generate PDF reports.") from exc
+
 
 def read_wav(file_obj):
     """Read PCM WAV data without requiring SciPy."""
@@ -786,6 +809,218 @@ def correlate_and_build_report(case_title, investigator, evidence_records, all_f
         "audit_trail": audit_trail,
     }
 
+def getSampleStyleSheet():
+    raise NotImplementedError
+
+
+def build_pdf_report(report: Dict[str, Any]) -> bytes:
+    buffer = io.BytesIO()
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="ReportTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=20,
+        leading=24,
+        alignment=1,
+        textColor=colors.HexColor("#1F2937"),
+        spaceAfter=12,
+    ))
+    styles.add(ParagraphStyle(
+        name="ReportSection",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=17,
+        textColor=colors.HexColor("#1E3A5F"),
+        spaceBefore=10,
+        spaceAfter=6,
+    ))
+    styles.add(ParagraphStyle(
+        name="ReportBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#334155"),
+    ))
+    styles.add(ParagraphStyle(
+        name="Verdict",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=15,
+        leading=18,
+        alignment=1,
+        textColor=colors.HexColor("#9A3412"),
+    ))
+
+    def text(value):
+        return str(value if value is not None else "N/A").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def header_footer(canvas, doc):
+        canvas.saveState()
+        width, height = A4
+        canvas.setFillColor(colors.HexColor("#1E3A5F"))
+        canvas.rect(0, height - 12*mm, width, 12*mm, fill=1, stroke=0)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 9)
+        canvas.drawString(18*mm, height - 8*mm, "TRUTHLENS FORENSIC REPORT")
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.setFont("Helvetica", 8)
+        canvas.drawString(18*mm, 10*mm, f"{report['report_id']} / {report['case_id']}")
+        canvas.drawRightString(width - 18*mm, 10*mm, f"Page {doc.page}")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18*mm,
+        leftMargin=18*mm,
+        topMargin=18*mm,
+        bottomMargin=16*mm,
+        title=f"{report['case_title']} - {report['report_id']}",
+        author=report["investigator"],
+    )
+    story = [Spacer(1, 8*mm), Paragraph("MEDIA AUTHENTICITY REPORT", styles["ReportTitle"])]
+
+    summary = [
+        ["Report ID", text(report["report_id"]), "Case ID", text(report["case_id"])],
+        ["Case title", text(report["case_title"]), "Investigator", text(report["investigator"])],
+        ["Generated", text(report["generated_at"]), "Evidence items", str(len(report["source_trace"]))],
+    ]
+    summary_table = Table(summary, colWidths=[27*mm, 52*mm, 27*mm, 52*mm])
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#EAF0F7")),
+        ("BACKGROUND", (2,0), (2,-1), colors.HexColor("#EAF0F7")),
+        ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 8),
+        ("LEADING", (0,0), (-1,-1), 11),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+    ]))
+    story.extend([summary_table, Spacer(1, 6*mm), Paragraph("EXECUTIVE VERDICT", styles["ReportSection"])])
+
+    verdict = report["verdict"]
+    verdict_table = Table([
+        [Paragraph("Classification", styles["ReportBody"]), Paragraph(text(verdict["classification_label"]), styles["Verdict"])],
+        ["Combined morphed/fake", f"{verdict['combined_morphed_fake_percent']}%"],
+        ["Estimated authentic", f"{verdict['estimated_authentic_percent']}%"],
+        ["Uncertainty margin", f"± {verdict['uncertainty_margin_percent']}%"],
+    ], colWidths=[45*mm, 113*mm])
+    verdict_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#FFF7ED")),
+        ("BOX", (0,0), (-1,-1), 1, colors.HexColor("#FDBA74")),
+        ("INNERGRID", (0,0), (-1,-1), 0.5, colors.HexColor("#FED7AA")),
+        ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 9),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ("RIGHTPADDING", (0,0), (-1,-1), 8),
+        ("TOPPADDING", (0,0), (-1,-1), 8),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+    ]))
+    story.extend([
+        verdict_table,
+        Spacer(1, 4*mm),
+        Paragraph("<b>Epistemic notice:</b> " + text(verdict["epistemic_notice"]), styles["ReportBody"]),
+        PageBreak(),
+        Paragraph("SOURCE EVIDENCE", styles["ReportSection"]),
+    ])
+
+    for source in report["source_trace"]:
+        metadata = source.get("metadata", {})
+        source_rows = [
+            ["Evidence ID", text(source["evidence_id"])],
+            ["Filename", text(source["filename"])],
+            ["Media type", text(source["media_type"])],
+            ["SHA-256", text(source["sha256_hash"])],
+        ]
+        if "width" in metadata and "height" in metadata:
+            source_rows.append(["Dimensions", f"{metadata['width']} x {metadata['height']} pixels"])
+        if "exif_date" in metadata:
+            source_rows.append(["EXIF date", text(metadata["exif_date"])])
+        if "camera_provenance_detected" in metadata:
+            source_rows.append(["Camera provenance", "Detected" if metadata["camera_provenance_detected"] else "Not detected"])
+        source_table = Table(source_rows, colWidths=[38*mm, 120*mm])
+        source_table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#EAF0F7")),
+            ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+            ("TOPPADDING", (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ]))
+        story.extend([source_table, Spacer(1, 4*mm)])
+
+    story.extend([PageBreak(), Paragraph("FLAGGED INDICATORS", styles["ReportSection"])])
+    if not report["flagged_evidence"]:
+        story.append(Paragraph("No manipulation or AI-generation indicators were triggered.", styles["ReportBody"]))
+    for index, finding in enumerate(report["flagged_evidence"], start=1):
+        finding_table = Table([
+            ["Indicator", text(finding["indicator_category"])],
+            ["Location", text(finding["location"])],
+            ["Severity", text(finding["severity"])],
+            ["Signal type", text(finding["signal_type"])],
+            ["Confidence", text(finding["confidence_interval"])],
+            ["Observed signal", text(finding["observed_signal"])],
+            ["Explanation", text(finding["explanation"])],
+            ["Alternative explanations", "; ".join(text(item) for item in finding["alternative_explanations"])],
+            ["Limitations", "; ".join(text(item) for item in finding["limitations"])],
+        ], colWidths=[38*mm, 120*mm])
+        finding_table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#F1F5F9")),
+            ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("LEADING", (0,0), (-1,-1), 10),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        story.extend([Paragraph(f"{index}. {text(finding['indicator_category'])}", styles["Heading2"]), finding_table, Spacer(1, 4*mm)])
+
+    story.extend([PageBreak(), Paragraph("AUDIT TRAIL", styles["ReportSection"])])
+    audit_rows = [["Timestamp (UTC)", "Action", "Details"]]
+    for log in report["audit_trail"]:
+        audit_rows.append([text(log["timestamp"]), text(log["action"]), text(log["details"])])
+    audit_table = Table(audit_rows, colWidths=[43*mm, 35*mm, 80*mm], repeatRows=1)
+    audit_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1E3A5F")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 7),
+        ("LEADING", (0,0), (-1,-1), 9),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E1")),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 5),
+        ("RIGHTPADDING", (0,0), (-1,-1), 5),
+        ("TOPPADDING", (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+    ]))
+    story.extend([
+        audit_table,
+        Spacer(1, 8*mm),
+        Paragraph(
+            "<b>Important:</b> This report presents automated forensic indicators, not a definitive determination "
+            "of authenticity, provenance, or intent. Findings should be corroborated with original source files "
+            "and additional forensic evidence.",
+            styles["ReportBody"],
+        ),
+    ])
+
+    doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
+    return buffer.getvalue()
+
 
 def build_sample_evidence() -> Tuple[bytes, bytes, str]:
     img = Image.new("RGB", (480, 320), (45, 70, 110))
@@ -1082,13 +1317,26 @@ if run_demo or run_scan:
 
     with st.container(border=True):
         st.subheader("Download your report", icon=":material/download:")
-        st.caption("Save the complete investigation, findings, and chain-of-custody data as JSON.")
-        st.download_button(
-            "Download full JSON report",
+        st.caption("Save the complete investigation, findings, and chain-of-custody data.")
+        pdf_bytes = build_pdf_report(report)
+        pdf_name = f"{report['report_id']}_{report['case_id']}.pdf"
+        pdf_col, json_col = st.columns(2)
+        pdf_col.download_button(
+            "Download PDF report",
+            data=pdf_bytes,
+            file_name=pdf_name,
+            mime="application/pdf",
+            icon=":material/picture_as_pdf:",
+            width="stretch",
+        )
+        json_col.download_button(
+            "Download JSON report",
             data=json.dumps(report, indent=2),
             file_name=f"{report['report_id']}_{report['case_id']}.json",
             mime="application/json",
-            icon=":material/download:",
+            icon=":material/code:",
             width="stretch",
         )
+        with st.expander("Preview PDF report", icon=":material/visibility:"):
+            st.pdf(pdf_bytes, height=500)
 # Removed duplicate/corrupted trailing content below the valid UI.  "filename": filename, "media_type": "image", "sha256_hash": sha256_hash, "location": "File Header / Software Tag", "indicator_category": "Editing Software Trace", "signal_type": "morphed", "observed_signal": f"Image header references editing software: {', '.join(detected_editors)}.", "explanation": "This image was exported from an editing program rather than straight from a camera sensor.", "raw_score": 0.62, "confidence_interval": "62% ± 15% (Moderate)", "severity": "MEDIUM", "alternative_explanations": ["Routine cropping, resizing, or color correction by the original photographer."], "limitations": ["Software tags confirm post-processing, not malicious manipulation."], }) elif not has_exif: # Informational only — excluded from manipulation scoring so WhatsApp/screenshots don't false-trigger findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "image", "sha256_hash": sha256_hash, "location": "File Header","indicator_category": "Stripped Camera Metadata (Info)", "signal_type": "info", "observed_signal": "No camera EXIF metadata found in file header.", "explanation": "Camera details are absent. This is very common for images shared via WhatsApp, Instagram, or screenshots, as well as AI images.", "raw_score": 0.10, "confidence_interval": "10% ± 10% (Informational)", "severity": "LOW", "alternative_explanations": ["Messaging apps and social platforms automatically strip EXIF data for privacy."], "limitations": ["Missing metadata alone is never proof of editing or AI generation."], }) # Edge-Compensated 8x8 MAD ELA + Sensor Noise Consistency rgb_img = img.convert("RGB") max_dim = 512 scale = min(1.0, max_dim / max(orig_w, orig_h)) w, h = max(32, int(orig_w * scale)), max(32, int(orig_h * scale)) resized = rgb_img.resize((w, h), Image.Resampling.BILINEAR) buf = io.BytesIO() resized.save(buf, format="JPEG", quality=90) buf.seek(0) recomp = Image.open(buf).convert("RGB") orig_arr = np.asarray(resized, dtype=np.float32) recomp_arr = np.asarray(recomp, dtype=np.float32) diff_map = np.mean(np.abs(orig_arr - recomp_arr), axis=2) # Grayscale luminance for edge masking & Laplacian noise gray = 0.299 * orig_arr[:, :, 0] + 0.587 * orig_arr[:, :, 1] + 0.114 * orig_arr[:, :, 2] gx = np.abs(np.diff(gray, axis=1, prepend=gray[:, :1]))gy = np.abs(np.diff(gray, axis=0, prepend=gray[:1, :])) edge_strength = gx + gy # Down-weight sharp natural edges so real photos don't false-trigger edge_weight = 1.0 / (1.0 + edge_strength / 18.0) compensated_ela = diff_map * edge_weight # Laplacian high-pass noise map (only in smooth regions) lap = np.abs(cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F)) smooth_mask = edge_strength < 20.0 # Build visual ELA heatmap ela_vis = np.clip(diff_map * 12.0, 0, 255).astype(np.uint8) heatmap_rgb = np.stack([ ela_vis, np.clip(ela_vis * 0.45, 0, 255).astype(np.uint8), (255 - ela_vis).astype(np.uint8), ], axis=2) ela_heatmap_img = Image.fromarray(heatmap_rgb) # 8x8 Grid Robust MAD Z-Score grid = 8 gh, gw = max(1, h // grid), max(1, w // grid) block_ela = [] block_noise = [] for r in range(grid): for c in range(grid): patch_ela = compensated_ela[r * gh:(r + 1) * gh, c * gw:(c + 1) * gw] if patch_ela.size > 0: block_ela.append((float(np.mean(patch_ela)), r, c)) patch_mask = smooth_mask[r * gh:(r + 1) * gh, c * gw:(c + 1) * gw]if np.sum(patch_mask) > 30: patch_lap = lap[r * gh:(r + 1) * gh, c * gw:(c + 1) * gw] block_noise.append(float(np.mean(patch_lap[patch_mask]))) ela_vals = np.array([b[0] for b in block_ela]) median_ela = float(np.median(ela_vals)) mad_ela = float(np.median(np.abs(ela_vals - median_ela))) peak_val, peak_r, peak_c = max(block_ela, key=lambda x: x[0]) robust_z = (peak_val - median_ela) / (1.4826 * max(mad_ela, 0.25)) if robust_z > 3.2 and peak_val > 3.0: provenance_discount = 0.12 if metadata["camera_provenance_detected"] else 0.0 score = max(0.40, min(0.84, round(0.48 + (robust_z - 3.2) * 0.08 provenance_discount, 2))) findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "image", "sha256_hash": sha256_hash, "location": f"Region [Row {peak_r + 1}/8, Col {peak_c + 1}/8]", "indicator_category": "Localized Compression Splice (Edge-Compensated ELA)", "signal_type": "morphed", "observed_signal": f"Non-edge compression anomaly (Robust Z={robust_z:.2f}, patch={peak_val:.2f} vs median={median_ela:.2f}).", "explanation": "A localized interior region shows significantly different JPEG compression error than the rest of the photo even after discounting sharp natural edges.", "raw_score": score, "confidence_interval": f"{int(score*100)}% ± 14% ({'High' if score >= 0.7 else 'Moderate'})", "severity": "HIGH" if score >= 0.7 else "MEDIUM", "alternative_explanations": ["Localized text overlays, watermarks, or bright specular reflections.", "Re-saving a previously compressed image at a different quality factor.", ], "limitations": ["Signal-level ELA is less effective on screenshots or heavily downsampled social-media images."], }) if len(block_noise) >= 12: med_n = float(np.median(block_noise)) ratio = max(block_noise) / max(min(block_noise), 0.3) if ratio > 4.8 and med_n > 1.2: score = min(0.74, round(0.46 + (ratio - 4.8) * 0.05, 2)) findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "image", "sha256_hash": sha256_hash, "location": "Smooth-Region Noise Floor", "indicator_category": "Sensor Grain / Noise Mismatch", "signal_type": "morphed", "observed_signal": f"Smooth-area noise variance ratio is {ratio:.1f}x across the frame.", "explanation": "Real camera sensors produce fairly uniform grain across smooth areas. A sharp mismatch can indicate an AI-inpainted patch or a pasted object.", "raw_score": score, "confidence_interval": f"{int(score*100)}% ± 16% (Moderate)", "severity": "MEDIUM", "alternative_explanations": ["Portrait-mode bokeh blur, heavy low-light denoising, or out-of-focus backgrounds."], "limitations": ["Shallow depth-of-field photography naturally creates smoother background regions."], })return metadata, findings, resized, ela_heatmap_img # =========================================================================== === # 2. VIDEO FORENSIC ENGINE # =========================================================================== === def analyze_video(raw_bytes: bytes, evidence_id: str, filename: str, sha256_hash: str): findings = [] header_text = extract_header_text(raw_bytes) detected_ai = [name for key, name in AI_VIDEO_SIGNATURES if key in header_text] if detected_ai: findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "video", "sha256_hash": sha256_hash, "location": "Video Container Metadata", "indicator_category": "AI Video Platform Signature", "signal_type": "fake", "observed_signal": f"AI video generator trace detected: {', '.join(detected_ai)}.", "explanation": "The video container header references a known generative video platform or C2PA AI tag.", "raw_score": 0.90, "confidence_interval": "90% ± 6% (High)", "severity": "HIGH","alternative_explanations": ["Authentic footage edited or exported through an AI video suite."], "limitations": ["Re-encoding on social platforms strips container metadata."], }) suffix = os.path.splitext(filename)[1] or ".mp4" with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp: tmp.write(raw_bytes) tmp_path = tmp.name try: cap = cv2.VideoCapture(tmp_path) if not cap.isOpened(): return {"error": "Unable to decode video", "ai_platform_traces": detected_ai}, findings fps = cap.get(cv2.CAP_PROP_FPS) or 25.0 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) duration_sec = round(frame_count / fps, 2) if fps > 0 else 0.0 metadata = { "fps": round(fps, 2), "frame_count": frame_count, "resolution": f"{width}x{height}", "duration_sec": duration_sec, "ai_platform_traces": detected_ai, } step = max(1, frame_count // 100) if frame_count > 0 else 1 prev_hist = Nonesharpness_series = [] hist_diffs = [] idx = 0 while True: ret, frame = cap.read() if not ret: break if idx % step == 0: gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) sharpness_series.append(float(cv2.Laplacian(gray, cv2.CV_64F).var())) hist = cv2.calcHist([gray], [0], None, [32], [0, 256]) cv2.normalize(hist, hist) if prev_hist is not None: diff = float(cv2.compareHist(prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)) hist_diffs.append((idx, diff)) prev_hist = hist idx += 1 cap.release() if hist_diffs: diffs_only = np.array([d[1] for d in hist_diffs]) mean_d, std_d = float(diffs_only.mean()), float(diffs_only.std()) + 1e-5 anomalies = [(f, v) for f, v in hist_diffs if (v - mean_d) / std_d > 2.8 and v > 0.28] if anomalies: top_f, top_v = max(anomalies, key=lambda x: x[1]) ts = round(top_f / fps, 2) score = min(0.80, round(0.50 + top_v * 0.35, 2)) findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "video","sha256_hash": sha256_hash, "location": f"Frame {top_f} ({ts:.2f}s)", "indicator_category": "Temporal Discontinuity", "signal_type": "morphed", "observed_signal": f"Abrupt histogram shift (Bhattacharyya={top_v:.2f}) at {ts:.2f}s.", "explanation": "Sudden frame-to-frame luminance shifts can indicate spliced segments or temporal flicker.", "raw_score": score, "confidence_interval": f"{int(score*100)}% ± 18% (Moderate)", "severity": "MEDIUM", "alternative_explanations": ["Intentional scene cuts, camera flash, or rapid panning."], "limitations": ["Requires human review of the exact timestamp to rule out normal cuts."], }) if len(sharpness_series) > 10: s_arr = np.array(sharpness_series) cv_sharp = float(s_arr.std() / (s_arr.mean() + 1e-5)) if cv_sharp > 0.70: score = min(0.75, round(0.45 + (cv_sharp - 0.70) * 0.35, 2)) findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "video", "sha256_hash": sha256_hash, "location": f"Timeline (0.00s - {duration_sec:.2f}s)", "indicator_category": "Temporal Blur / Focus Instability", "signal_type": "morphed", "observed_signal": f"Sharpness coefficient of variation = {cv_sharp:.2f}.","explanation": "Face-swapping pipelines often introduce inconsistent frame-byframe blurring around synthesized regions.", "raw_score": score, "confidence_interval": f"{int(score*100)}% ± 20% (Low-Moderate)", "severity": "MEDIUM", "alternative_explanations": ["Autofocus hunting, handheld shake, or low-light motion blur."], "limitations": ["Global sharpness variance does not isolate facial regions."], }) return metadata, findings finally: if os.path.exists(tmp_path): os.remove(tmp_path) # =========================================================================== === # 3. AUDIO FORENSIC ENGINE # =========================================================================== === def analyze_audio(raw_bytes: bytes, evidence_id: str, filename: str, sha256_hash: str): findings = [] header_text = extract_header_text(raw_bytes) detected_ai = [name for key, name in AI_AUDIO_SIGNATURES if key in header_text] if detected_ai: findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "audio","sha256_hash": sha256_hash, "location": "Audio Container Metadata", "indicator_category": "AI Voice / Audio Platform Signature", "signal_type": "fake", "observed_signal": f"Embedded AI audio tag found: {', '.join(detected_ai)}.", "explanation": "The audio header explicitly references an AI voice cloning or music generation platform.", "raw_score": 0.90, "confidence_interval": "90% ± 6% (High)", "severity": "HIGH", "alternative_explanations": ["Authentic voice cleaned up using an AI audio mastering tool."], "limitations": ["Re-encoding to MP3/AAC often removes RIFF/ID3 metadata."], }) try: sr, data = wavfile.read(io.BytesIO(raw_bytes)) except Exception: return {"note": "Non-WAV container; upload PCM WAV for full spectral analysis", "ai_platform_traces": detected_ai}, findings if data.ndim > 1: data = data.mean(axis=1) data = data.astype(np.float32) data = data / (np.max(np.abs(data)) + 1e-6) duration_sec = round(len(data) / sr, 2) metadata = { "sample_rate_hz": int(sr), "duration_sec": duration_sec, "ai_platform_traces": detected_ai, }freqs, psd = welch(data, fs=sr, nperseg=min(2048, len(data))) total_energy = float(np.sum(psd)) + 1e-12 high_mask = freqs > 7000 high_ratio = float(np.sum(psd[high_mask]) / total_energy) if np.any(high_mask) else 0.0 if sr >= 16000 and high_ratio < 0.002: findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "audio", "sha256_hash": sha256_hash, "location": f"Spectral Band >7kHz (0.00s - {duration_sec:.2f}s)", "indicator_category": "High-Frequency Spectral Roll-Off", "signal_type": "fake", "observed_signal": f"Energy above 7kHz is only {high_ratio*100:.4f}% at {sr}Hz sample rate.", "explanation": "Many neural vocoders and cloned speech models exhibit sharp high-frequency cutoffs compared to natural microphones.", "raw_score": 0.64, "confidence_interval": "64% ± 17% (Moderate)", "severity": "MEDIUM", "alternative_explanations": ["Phone calls (VoIP/cellular), Bluetooth headsets, or aggressive noise suppression."], "limitations": ["Modern 48kHz neural vocoders may not show this cutoff."], }) frame_len = max(1, int(sr * 0.1)) num_frames = len(data) // frame_len rms_vals = [float(np.sqrt(np.mean(data[i * frame_len:(i + 1) * frame_len] ** 2))) for i in range(num_frames)] near_zero = [i for i, r in enumerate(rms_vals) if r < 1e-4]if num_frames > 10 and (len(near_zero) / num_frames) > 0.12: start_s, end_s = round(near_zero[0] * 0.1, 2), round(near_zero[-1] * 0.1, 2) findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "audio", "sha256_hash": sha256_hash, "location": f"Audio Segments ({start_s:.2f}s - {end_s:.2f}s)", "indicator_category": "Synthetic Digital Silence / Spliced Pauses", "signal_type": "morphed", "observed_signal": f"{len(near_zero)} of {num_frames} windows exhibit near-zero digital silence.", "explanation": "Natural recordings keep a steady room-tone noise floor. Pure digital zeros between words often point to TTS generation or spliced audio.", "raw_score": 0.68, "confidence_interval": "68% ± 15% (Moderate)", "severity": "MEDIUM", "alternative_explanations": ["Studio noise gates or conferencing apps (Zoom/Krisp)."], "limitations": ["Cannot distinguish synthetic silence from aggressive noise-gate post-processing."], }) return metadata, findings # =========================================================================== === # 4. TEXT & LLM-ORIGIN FORENSIC ENGINE# =========================================================================== === def analyze_text(content: str, evidence_id: str, filename: str, sha256_hash: str): findings = [] words = content.split() lower_text = content.lower() extracted_dates = list(set(DATE_PATTERN.findall(content))) triggered_cues = [cue for cue in URGENCY_CUES if cue in lower_text] llm_hits = [p for p in LLM_PHRASES if p in lower_text] sentences = [s.strip() for s in re.split(r"[.!?]+", content) if len(s.strip().split()) > 2] burstiness = None if len(sentences) >= 3: lengths = np.array([len(s.split()) for s in sentences], dtype=np.float32) burstiness = float(lengths.std() / (lengths.mean() + 1e-5)) metadata = { "word_count": len(words), "extracted_dates": extracted_dates, "llm_phrase_hits": llm_hits, "sentence_burstiness": round(burstiness, 2) if burstiness is not None else None, } if len(llm_hits) >= 2 or (len(llm_hits) >= 1 and burstiness is not None and burstiness < 0.25): score = min(0.78, round(0.55 + 0.10 * len(llm_hits), 2)) findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "text", "sha256_hash": sha256_hash,"location": f"Text Body ({len(words)} words)", "indicator_category": "AI / LLM Writing Pattern", "signal_type": "fake", "observed_signal": f"Matched LLM phrasing markers ({', '.join(llm_hits)}) with uniform sentence rhythm.", "explanation": "Text exhibits stylistic uniformity and phrasing patterns frequently produced by ChatGPT, Claude, or Gemini.", "raw_score": score, "confidence_interval": f"{int(score*100)}% ± 18% (Moderate)", "severity": "MEDIUM", "alternative_explanations": ["Formal press releases, PR copy, or non-native English writers using grammar assistants."], "limitations": ["Text-only AI detection has high variance on short passages."], }) if triggered_cues: findings.append({ "evidence_id": evidence_id, "filename": filename, "media_type": "text", "sha256_hash": sha256_hash, "location": f"Text Body ({len(words)} words)", "indicator_category": "Sensational / Disinformation Framing", "signal_type": "morphed", "observed_signal": f"High-urgency framing detected: {', '.join(triggered_cues)}.", "explanation": "Manipulated media campaigns frequently pair altered visuals with urgent captions to bypass critical verification.", "raw_score": 0.50, "confidence_interval": "50% ± 20% (Moderate-Low)", "severity": "LOW", "alternative_explanations": ["Authentic breaking news or emotional eyewitness posts."],"limitations": ["Linguistic framing is a contextual risk factor, not proof of fabrication."], }) return metadata, findings # =========================================================================== === # 5. CROSS-MODAL CORRELATOR & MORPHED / FAKE SCORING # =========================================================================== === def correlate_and_build_report(case_title, investigator, evidence_records, all_findings, audit_trail): correlations = [] images = [e for e in evidence_records if e["media_type"] == "image"] videos = [e for e in evidence_records if e["media_type"] == "video"] audios = [e for e in evidence_records if e["media_type"] == "audio"] texts = [e for e in evidence_records if e["media_type"] == "text"] # Cross-Modal Check 1: Image EXIF Date vs Text Claimed Dates for img in images: exif_date = img["metadata"].get("exif_date") if exif_date: exif_year = exif_date[:4] for txt in texts: claimed = txt["metadata"].get("extracted_dates", []) if claimed and not any(exif_year in d for d in claimed): correlations.append({ "correlation_id": f"XMOD-{uuid.uuid4().hex[:5].upper()}","involved_evidence_ids": [img["evidence_id"], txt["evidence_id"]], "relationship_type": "CONTRADICTION", "description": f"Image '{img['filename']}' header date ({exif_date}) conflicts with dates claimed in text ({', '.join(claimed)}).", "impact_on_confidence": "Strong indicator of out-of-context reuse or temporal misattribution (+10% risk).", }) # Cross-Modal Check 2: Video vs Audio Duration Drift for vid in videos: v_dur = vid["metadata"].get("duration_sec", 0) for aud in audios: a_dur = aud["metadata"].get("duration_sec", 0) if v_dur > 0 and a_dur > 0 and abs(v_dur - a_dur) > 1.5: correlations.append({ "correlation_id": f"XMOD-{uuid.uuid4().hex[:5].upper()}", "involved_evidence_ids": [vid["evidence_id"], aud["evidence_id"]], "relationship_type": "CONTRADICTION", "description": f"Video duration ({v_dur}s) differs from audio duration ({a_dur}s) by {abs(v_dur - a_dur):.2f}s.", "impact_on_confidence": "Suggests asynchronous dubbing or audio replacement (+10% risk).", }) active_findings = [f for f in all_findings if f.get("signal_type") != "info"] flagged_modalities = list({f["media_type"] for f in active_findings if f["raw_score"] >= 0.55}) if len(flagged_modalities) >= 2: correlations.append({ "correlation_id": f"XMOD-{uuid.uuid4().hex[:5].upper()}", "involved_evidence_ids": list({f["evidence_id"] for f in active_findings if f["raw_score"] >= 0.55}),"relationship_type": "REINFORCEMENT", "description": f"Independent anomalies detected across {len(flagged_modalities)} modalities ({', '.join(flagged_modalities)}).", "impact_on_confidence": "Converging signals across separate channels reduce single-sensor false positives.", }) if not correlations and len(evidence_records) >= 2: correlations.append({ "correlation_id": f"XMOD-{uuid.uuid4().hex[:5].upper()}", "involved_evidence_ids": [e["evidence_id"] for e in evidence_records], "relationship_type": "ALIGNMENT", "description": "No direct cross-modal contradictions detected across timestamps, durations, or metadata.", "impact_on_confidence": "Neutral — absence of contradiction does not guarantee authenticity.", }) # Morphed vs Fake Calibrated Percentages (excluding 'info' signals) contradiction_boost = 10 * sum(1 for c in correlations if c["relationship_type"] == "CONTRADICTION") morphed_scores = [f["raw_score"] for f in active_findings if f.get("signal_type") == "morphed"] fake_scores = [f["raw_score"] for f in active_findings if f.get("signal_type") == "fake"] morphed_pct = min(94, int(round(max(morphed_scores) * 100)) + contradiction_boost) if morphed_scores else (min(94, 6 + contradiction_boost)) fake_pct = min(94, int(round(max(fake_scores) * 100))) if fake_scores else 5 combined_pct = min(94, max(morphed_pct, fake_pct)) uncertainty_pct = max(8, 20 - 4 * len(flagged_modalities)) if morphed_pct >= 50 and fake_pct >= 50:verdict = "Morphed & Fake" elif fake_pct >= 50: verdict = "Fake (AI-Generated)" elif morphed_pct >= 50: verdict = "Morphed (Edited)" else: verdict = "Likely Authentic" return { "report_id": f"RPT-{uuid.uuid4().hex[:8].upper()}", "case_id": f"TL-{uuid.uuid4().hex[:8].upper()}", "case_title": case_title, "investigator": investigator, "generated_at": utcnow_iso(), "verdict": { "classification_label": verdict, "morphed_percent": morphed_pct, "fake_percent": fake_pct, "combined_morphed_fake_percent": combined_pct, "estimated_authentic_percent": max(6, 100 - combined_pct), "uncertainty_margin_percent": uncertainty_pct, "epistemic_notice": ( "TruthLens provides calibrated forensic indicators, not absolute proof. " "Benign re-encoding, social-media compression, or noise gates can trigger signals. " "Always review flagged evidence with human judgment." ), }, "source_trace": [ { "evidence_id": e["evidence_id"], "filename": e["filename"],"media_type": e["media_type"], "sha256_hash": e["sha256_hash"], "metadata": e["metadata"], } for e in evidence_records ], "flagged_evidence": all_findings, "cross_modal_context": correlations, "audit_trail": audit_trail, } # =========================================================================== === # 6. 1-CLICK SAMPLE INVESTIGATION GENERATOR # =========================================================================== === def build_sample_evidence() -> Tuple[bytes, bytes, str]: # 1. Spliced JPEG with Midjourney + Photoshop + 2023 EXIF comment img = Image.new("RGB", (480, 320), (45, 70, 110)) draw = ImageDraw.Draw(img) for y in range(320): draw.line([(0, y), (480, y)], fill=(45 + y // 8, 70 + y // 6, 110)) # High-frequency spliced patch draw.rectangle([280, 140, 420, 250], fill=(235, 195, 60), outline=(20, 20, 20), width=4) draw.text((295, 185), "SPLICED", fill=(10, 10, 10)) buf = io.BytesIO() img.save(buf, format="JPEG", quality=92) # Inject JPEG COM marker with AI/Editor & 2023 datecomment = b"Midjourney v6 / Adobe Photoshop / C2PA / DateTimeOriginal 2023:05:14 10:22:00" com_segment = b"\xff\xfe" + struct.pack(">H", len(comment) + 2) + comment raw_jpg = buf.getvalue() sample_jpg = raw_jpg[:2] + com_segment + raw_jpg[2:] # 2. Narrowband WAV with digital silence gaps + ElevenLabs tag sr = 16000 t = np.linspace(0, 3.0, sr * 3, endpoint=False) signal = 0.5 * np.sin(2 * np.pi * 440 * t) + 0.25 * np.sin(2 * np.pi * 880 * t) signal[sr:int(sr * 1.6)] = 0.0  # Pure digital silence gap pcm = (signal * 32767).astype(np.int16) wav_buf = io.BytesIO() with wave.open(wav_buf, "wb") as wf: wf.setnchannels(1) wf.setsampwidth(2) wf.setframerate(sr) wf.writeframes(pcm.tobytes()) sample_wav = wav_buf.getvalue() + b"LIST\x1a\x00\x00\x00INFOISFT\x0e\x00\x00\x00ElevenLabs v3\x00" # 3. Conflicting 2026 viral caption with LLM phrasing sample_text = ( "BREAKING leaked footage from November 2026! Share before deleted! " "It is important to note that this pivotal role underscores the importance of immediate action. " "In conclusion, this is undeniable proof of the event." ) return sample_jpg, sample_wav, sample_text# =========================================================================== === # 7. STREAMLIT USER INTERFACE (SIMPLE 3-STEP LIGHT-MODE WORKBENCH) # =========================================================================== === st.title("🔍 TruthLens — Multimodal Digital Forensics") st.caption("Check images, videos, audio, and text for editing (Morphed) or AI generation (Fake) with transparent confidence ranges.") top_col1, top_col2 = st.columns([3, 1]) with top_col2: run_demo = st.button("⚡ Try Sample Investigation", use_container_width=True, type="secondary") with st.expander("Optional Case Info (Title & Investigator)", expanded=False): c1, c2 = st.columns(2) case_title = c1.text_input("Case Title", value="Media Authenticity Check") investigator = c2.text_input("Investigator", value="Forensic Analyst") uploaded_files = st.file_uploader( "Step 1: Upload Images, Videos, Audio (WAV), or Text Files", type=["jpg", "jpeg", "png", "webp", "mp4", "mov", "avi", "wav", "txt"], accept_multiple_files=True, ) context_text = st.text_area( "Optional: Paste accompanying caption, claim, or transcript for cross-modal checking", height=100, placeholder="e.g., 'Breaking news photo taken in November 2026...'", )run_scan = st.button("🔎 Check for Edits & AI", type="primary", use_container_width=True) if run_demo or run_scan: evidence_records = [] all_findings = [] audit_trail = [{"timestamp": utcnow_iso(), "action": "CASE_OPENED", "details": f"Opened '{case_title}' by {investigator}."}] image_visuals = [] items_to_process = [] if run_demo: s_jpg, s_wav, s_txt = build_sample_evidence() items_to_process.append(("sample_press_photo.jpg", "image", s_jpg)) items_to_process.append(("sample_voice_clip.wav", "audio", s_wav)) items_to_process.append(("sample_viral_caption.txt", "text", s_txt.encode("utf-8"))) else: for f in uploaded_files or []: ext = os.path.splitext(f.name)[1].lower() m_type = "image" if ext in {".jpg", ".jpeg", ".png", ".webp"} else ( "video" if ext in {".mp4", ".mov", ".avi"} else ( "audio" if ext == ".wav" else "text" ) ) items_to_process.append((f.name, m_type, f.read())) if context_text.strip(): items_to_process.append(("pasted_context.txt", "text", context_text.encode("utf8"))) if not items_to_process: st.warning("Please upload at least one file or enter text context, or click **Try Sample Investigation**.") st.stop()with st.spinner("Step 2: Hashing evidence & running multimodal forensic engines..."): for fname, m_type, raw_bytes in items_to_process: ev_id = f"EV-{uuid.uuid4().hex[:6].upper()}" digest = sha256_bytes(raw_bytes) audit_trail.append({ "timestamp": utcnow_iso(), "action": "EVIDENCE_INGESTED", "details": f"{fname} ({m_type}) SHA-256:{digest[:16]}...", }) if m_type == "image": meta, findings, orig_img, ela_img = analyze_image(raw_bytes, ev_id, fname, digest) image_visuals.append((fname, orig_img, ela_img)) elif m_type == "video": meta, findings = analyze_video(raw_bytes, ev_id, fname, digest) elif m_type == "audio": meta, findings = analyze_audio(raw_bytes, ev_id, fname, digest) else: meta, findings = analyze_text(raw_bytes.decode("utf-8", errors="ignore"), ev_id, fname, digest) evidence_records.append({ "evidence_id": ev_id, "filename": fname, "media_type": m_type, "sha256_hash": digest, "metadata": meta, }) all_findings.extend(findings) audit_trail.append({"timestamp": utcnow_iso(), "action": "ANALYSIS_COMPLETE", "details": f"Analyzed {len(evidence_records)} item(s); logged {len(all_findings)} indicator(s).", }) report = correlate_and_build_report(case_title, investigator, evidence_records, all_findings, audit_trail) # ========================================================================== # STEP 3: EASY-TO-READ FORENSIC REPORT # ========================================================================== st.divider() v = report["verdict"] st.subheader(f"Step 3: Forensic Result — {v['classification_label']}") m1, m2, m3, m4 = st.columns(4) m1.metric("Morphed (Edited)", f"{v['morphed_percent']}%") m2.metric("Fake (AI-Generated)", f"{v['fake_percent']}%") m3.metric("Combined Risk", f"{v['combined_morphed_fake_percent']}% ± {v['uncertainty_margin_percent']}%") m4.metric("Est. Authentic", f"{v['estimated_authentic_percent']}%") st.progress(v["combined_morphed_fake_percent"] / 100.0) st.info(f"**Forensic Trust Notice:** {v['epistemic_notice']}") # Cross-Modal Correlation st.markdown("### 🔗 Cross-Modal Correlation") for c in report["cross_modal_context"]: badge = "badge-high" if c["relationship_type"] == "CONTRADICTION" else ( "badge-med" if c["relationship_type"] == "REINFORCEMENT" else "badge-low") st.markdown( f"<div class='verdict-card'><span class='{badge}'>{c['relationship_type']}</span> " f"&nbsp; <strong>{c['description']}</strong><br/><small> {c['impact_on_confidence']}</small></div>", unsafe_allow_html=True, ) # Visual Comparison (Original vs ELA Heatmap) if image_visuals: st.markdown("### 🖼 Image Inspection (Original vs. Edit Highlight Map)") for fname, orig_img, ela_img in image_visuals: col_a, col_b = st.columns(2) col_a.image(orig_img, caption=f"Original: {fname}", use_container_width=True) col_b.image(ela_img, caption="ELA Residual Heatmap (Brighter = higher compression diff)", use_container_width=True) # Flagged Findings st.markdown(f"### 📋 Detected Indicators ({len(report['flagged_evidence'])})") if not report["flagged_evidence"]: st.success("No manipulation or AI-generation indicators were triggered.") else: for f in report["flagged_evidence"]: badge_cls = "badge-info" if f["signal_type"] == "info" else ( "badge-high" if f["severity"] == "HIGH" else ("badge-med" if f["severity"] == "MEDIUM" else "badge-low") ) with st.container(border=True): st.markdown( f"<span class='{badge_cls}'>{f['severity']} • {f['signal_type'].upper()}</span> " f"&nbsp; **{f['indicator_category']}** — `{f['filename']}` ({f['confidence_interval']})",) unsafe_allow_html=True, st.write(f"**Where:** {f['location']}  \n**What was seen:** {f['observed_signal']} \n**Why it matters:** {f['explanation']}") with st.expander("Innocent Explanations & Limitations"): st.write("**Alternative Benign Explanations:**", "; ".join(f["alternative_explanations"])) st.write("**Methodological Limitations:**", "; ".join(f["limitations"])) # Chain of Custody & Export with st.expander("🔐 Chain-of-Custody (SHA-256 Fingerprints & Audit Trail)"): for src in report["source_trace"]: st.code(f"{src['evidence_id']} | {src['filename']} ({src['media_type']})\nSHA-256: {src['sha256_hash']}") for log in report["audit_trail"]: st.text(f"[{log['timestamp']}] {log['action']}: {log['details']}") st.download_button( label="⬇ Download Full JSON Forensic Report", data=json.dumps(report, indent=2), file_name=f"{report['report_id']}_{report['case_id']}.json", mime="application/json", use_container_width=True, )
