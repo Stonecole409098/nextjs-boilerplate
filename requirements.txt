@@ -5,3 +5,4 @@ opencv-python-headless
 scipy
 transformers[torch]
 reportlab
+streamlit[pdf]
